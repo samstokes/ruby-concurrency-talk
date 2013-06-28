@@ -12,6 +12,9 @@ end
 
 def link_content(url)
   uri = URI.parse(url)
+  unless uri.host
+    return link_content("https://news.ycombinator.com/#{url}")
+  end
   http = Net::HTTP.new(uri.host, uri.port)
   http.use_ssl = uri.scheme == 'https'
   puts "getting #{url}"
