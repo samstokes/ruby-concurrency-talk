@@ -10,6 +10,10 @@ def hnlinks(document)
   links.reject {|link| link.text == 'More' }
 end
 
+def cache_bust
+  {'Cookie' => "cache_bust=#{rand 10_000}"}
+end
+
 def link_content(url)
   uri = URI.parse(url)
   unless uri.host
@@ -17,16 +21,28 @@ def link_content(url)
   end
   http = Net::HTTP.new(uri.host, uri.port)
   http.use_ssl = uri.scheme == 'https'
-  puts "getting #{url}"
+  http.verify_mode = OpenSSL::SSL::VERIFY_NONE
   path = uri.path.empty? ? '/' : uri.path
-  http.get(path).body
+  http.get(path, cache_bust).body.tap do
+    puts "got #{url}"
+  end
+end
+
+get '/' do
+  sleep 5
+  <<-HTML
+    <form method=GET action="/grep">
+      Regex to filter out:
+      <input name="regex" />
+    </form>
+  HTML
 end
 
 get '/grep' do
   regex = Regexp.new(params.fetch('regex'), 'i')
   http = Net::HTTP.new('news.ycombinator.com', 443)
   http.use_ssl = true
-  html = http.get('/').body
+  html = http.get('/', cache_bust).body
 
   document = Nokogiri(html)
 
@@ -36,7 +52,7 @@ get '/grep' do
 
   link_contents = links.map do |link|
     Thread.new do
-      link_content(link[:href])
+      link_content(link[:href]) rescue ''
     end
   end.map(&:value)
   links_bad_content = links.
