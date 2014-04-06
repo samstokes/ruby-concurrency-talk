@@ -1,0 +1,392 @@
+Filtering Hacker News with Ruby
+	Sam Stokes
+		<IMAGE
+		<rapportive-large.jpg
+		Londoner in San Francisco since 2010
+		CTO of Rapportive
+		Now building cool secret things for LinkedIn
+		Haskell on the weekends
+Filtering Hacker News
+	Given a regex
+	Serves Hacker News minus that regex
+		No articles which match that regex
+		Title *or content*
+	DEMO
+Outline
+	CPU-bound vs I/O-bound
+	Rough scaling calculations
+	Problems with I/O-bound apps
+	Filtering Hacker News
+		Compare approaches
+	Summary
+Terminology
+	Request processing latency (ms)
+		How long your app took to process a request
+	User perceived latency (ms)
+		How long a user waited for a response to their request
+		Includes network, queuing, etc.
+	Throughput (req/sec, QPS, RPM)
+		How many requests did you serve in a given space of time
+		... regardless of how long you took to serve them
+	Capacity
+		How many requests *can* you serve in a given space of time
+		= max throughput
+CPU-bound life
+	Most Rails apps:
+		Parse request
+		Hit the database (hopefully fast)
+		Authentication
+		Business logic
+		Render response
+CPU-bound: Performance
+	Latency is
+		consistent
+		tunable
+	Throughput = 1 / mean latency
+		mean latency of 100ms
+		throughput is 10 req/sec per process
+CPU-bound: Scaling
+	Add processes until you max out your CPU
+	1 process per core
+		If your database is fast!
+CPU-bound: Efficiency
+	Throughput = n / mean latency
+		mean latency of 100ms
+		10 req/sec per process
+		EC2 c1.medium: 5 ECU (~ 5 cores)
+		6 processes to max out 5 cores
+		throughput is 60 req/sec per machine
+	not too bad!
+I/O-bound life
+	"Just pull their photo from Facebook"
+		Parse request
+		Hit the database (hopefully fast)
+		Call some API...
+		Wait...
+		Wait...
+		Render response
+“People say nothing is impossible, but I do nothing every day.” - A. A. Milne
+	A process waiting for I/O...
+	is doing...
+	nothing
+I/O-bound: Performance
+	Latency is
+		greater
+		highly variable
+		outside your control!
+	Throughput sucks!
+		mean latency of 500ms
+		throughput is 2 req/sec per process
+I/O-bound: Scaling
+	Add processes until you max out your CPU
+	5+ processes per core
+		each process only needs the CPU 20% of the time
+		I hope you have plenty of RAM!
+I/O-bound: Efficiency
+	Throughput = n / mean latency
+		mean latency of 500ms
+		2 req/sec per process
+		EC2 c1.medium: 5 ECU (~ 5 cores), 1.7GB RAM
+		25 processes to max out 5 cores
+		Oops!  1.7GB only fits about 8 processes
+		throughput is 16 req/sec per machine
+	Ugh.
+		Even with more RAM we could only get 50 req/sec
+Villain #1: tail latency
+	<IMAGE
+	<tails.jpg
+	Most web APIs have highly variable latency
+		the mean might be 500ms...
+		but what happens when it spikes to 1500ms?
+	During latency spikes
+		*all* your requests are 3x slower
+		so your throughput is 3x worse
+		5 req/sec per c1.medium!
+Tail latency is expensive
+	<IMAGE
+	<tails.jpg
+	Provision for worst case
+		3x more machines
+		What if it spikes to 10 *seconds*?
+Villain #2...
+	<IMAGE
+	<blank.gif
+	A process waiting for I/O is doing nothing
+	Not processing requests
+	So the next request...
+Villain #2: queuing
+	<IMAGE
+	<queue.jpg
+	A process waiting for I/O is doing nothing
+	Not processing requests
+	So the next request...
+	goes in a queue.
+		probably TCP stack listen queue
+Villain #2: queuing
+	<IMAGE
+	<queue.jpg
+	Queuing ruins user experience!
+	Perceived latency grows:
+		rapidly
+		even faster than request processing latency
+Filtering Hacker News: pseudocode
+	<RUBY
+	<html = fetch 'https://news.ycombinator.com/'
+	<document = parse(html)
+	<links = document.find_links
+	<links.reject! {|link| link.title =~ regex }
+	<links.reject! do |link|
+	<  link_html = fetch link.href
+	<  link_html =~ regex
+	<end
+	<serve document
+	This is horribly I/O-bound
+	Not going into:
+		clever filtering heuristics
+		caching
+		robots.txt
+		rate limiting
+Filtering Hacker News naïvely
+	<RUBY
+	<# fetch https://news.ycombinator.com/
+	<http = Net::HTTP.new('news.ycombinator.com', 443)
+	<http.use_ssl = true
+	<html = http.get('/').body
+	<
+	<# parse HTML, find links
+	<document = Nokogiri(html)
+	<links = hnlinks(document)
+	<
+	<links_bad_title = links.select {|link| link.text =~ regex }
+	<
+	<links_bad_content = links.select do |link|
+	<  # fetch link
+	<  content = link_content(link[:href])
+	<  content =~ regex
+	<end
+	<
+	<bad_links = (links_bad_title + links_bad_content).uniq
+Filtering Hacker News naïvely, contd
+	Fetching links
+		<RUBY
+		<def link_content(url)
+		<  # tedious ceremony to placate Net::HTTP
+		<  uri = URI.parse(url)
+		<  unless uri.host
+		<    return link_content("https://news.ycombinator.com/#{url}")
+		<  end
+		<  http = Net::HTTP.new(uri.host, uri.port)
+		<  http.use_ssl = uri.scheme == 'https'
+		<  path = uri.path.empty? ? '/' : uri.path
+		<
+		<  # actually fetch page
+		<  http.get(path).body
+		<end
+Naïve approach: performance
+	DEMO
+I know, I'll use Node.js!
+	<IMAGE
+	<node.png
+	Now you have two problems...
+	Let's not give up on Ruby just yet!
+I know, I'll use background workers!
+	<IMAGE
+	<workers.jpg
+	Good idea!
+	... but doesn't quite solve our problem
+		we need the page contents
+		hard to get the response back
+	Now you have to scale your worker tier
+		Still want to maximise utilisation
+Hero #1: threads
+	<IMAGE
+	<threads.jpg
+	Lighter weight than processes
+		1 process with 20 threads uses much less RAM than 20 processes
+		Share data structures
+		Share code
+	Myths
+		Ruby threads don't work!
+		Threads are hard!
+		Thread safety is hard!
+Myth: Ruby threads don't work!
+	Not really true (any more)
+		1.8 had "green threads"
+		1.9 uses real OS threads
+	GIL limits you to one thread at a time...
+		(Global Interpreter Lock)
+	BUT: I/O releases the GIL!
+Myth: threads are hard!
+	Actually kind of true
+		Coordination
+		Race conditions
+		Error handling
+	BUT: simple uses can be easy
+		Thread#value
+Thread#value
+	<RUBY
+	<t = Thread.new do
+	<  sleep 5
+	<  42
+	<end
+	<
+	<t.value # blocks for 5 seconds
+	<# => 42
+	#value blocks current thread until t stops
+	Returns value of block
+Thread#value: coordination
+	<RUBY
+	<threads = (1..5).map do |i|
+	<  Thread.new { sleep 5; i }
+	<end
+	<
+	<threads.map(&:value) # blocks for 5 seconds
+	<# => [1, 2, 3, 4, 5]
+	Wait for all threads to return
+		First #value blocks
+		Subsequent #values return immediately
+Thread#value: error handling
+	<RUBY
+	<t = Thread.new do
+	<  sleep 5
+	<  raise "OH NOES"
+	<end
+	<
+	<begin
+	<  t.value # blocks Thread.current
+	<rescue => e
+	<  puts e
+	<end
+	<# OH NOES
+	Re-raises exceptions in current thread
+Myth: thread safety is hard!
+	Shared, mutable state is hard
+	Idiomatic Ruby is mostly thread safe
+		Avoid globals
+		Avoid @@class_variables
+Myth: thread safety is hard!
+	Does require care
+		Careful with class instance variables
+		<RUBY
+		<class MyRaceyClass
+		<  class << self
+		<    def acts_as_race_condition(name)
+		<      @bugs << name
+		<    end
+		<  end
+		<end
+		Usually just at load time
+		So spawn your threads after that
+	Real challenge is libraries
+		Rails / ActiveRecord: thread-safe since 2.3
+Filtering Hacker News with threads
+	<RUBY
+	<# Fire off all the requests in parallel...
+	<link_contents = links.map do |link|
+	<  Thread.new do
+	<    link_content(link[:href]) rescue ''
+	<  end
+	<end.map(&:value) # ... and collect the responses
+	<# => [contents_0, contents_1, ...]
+	Takes as long as the slowest request
+Filtering Hacker News with threads, contd.
+	<RUBY
+	<# link_contents = [contents_0, contents_1, ...]
+	<links_bad_content = links.
+	<  # [link_0, link_1, ...]
+	<  zip(link_contents).
+	<  # [[link_0, contents_0], [link_1, contents_1], ...]
+	<  select {|link, content| content =~ regex }.
+	<  # [[link_1, contents_1], [link_5, contents_5], ...]
+	<  map {|link, _| link }
+	<# => [link_1, link_5, ...]
+Threaded approach: performance
+	DEMO
+We're still wasting CPU
+	Now fetching links in parallel
+	But we're still waiting for responses
+	Could serve another request in that time!
+Hero #2: more threads!
+	<IMAGE
+	<puma.png
+	Puma
+		Ruby app server
+		runs any Rack app
+		Thread pool to serve requests
+Conflicted antihero: EventMachine
+	Non-blocking I/O and evented programming framework
+		Yes, like Node.js
+		actually predates Node
+	Works, fast
+		in production use at scale
+	Even lighter-weight than threads
+		No stacks to consume RAM
+		No context-switching
+EventMachine: not for the faint of heart
+	<RUBY
+	<require 'thin' # evented web server for rack apps
+	<
+	<callback = env['async.callback'] # so we can respond when done
+	<
+	<link_contents = {}
+	<
+	<finish_if_done = lambda do
+	<  if link_contents.size == links.size
+	<    # ... filter links by content
+	<    callback.call [200, {}, [document.to_s]]
+	<  end
+	<end
+	<
+	<links.each do |link|
+	<  link_content(link[:href]).callback do |link_http|
+	<    link_contents[link] = link_http.response
+	<    finish_if_done.call
+	<  end.errback do |link_http|
+	<    link_contents[link] = nil
+	<    finish_if_done.call
+	<  end
+	<end
+	<
+	<return [-1, {}, []] # magic to tell Thin to wait for callback
+	<# or "throw :async"
+EventMachine: downsides
+	Callback hell
+		turns your code inside out
+	Error handling
+		Each callback gets a fresh stack - hard to debug
+		Have to propagate errors manually
+		Exceptions can terminate event loop if not careful
+	Node.js has these problems too
+EventMachine: taming callback hell
+	A couple of options:
+	Fibers
+		Lightweight threads
+		Get their own stack
+		Can simulate synchronous API, hiding callbacks
+	Deferrable Gratification
+		Flow control library
+		Written at Rapportive by me and others
+		Chains, loops and joins for evented code
+Nothing is free!
+	Latency is still a few seconds
+	Still need to set timeouts
+	Latency spikes will still hurt
+	These techniques just help you use your machines better
+		so you need fewer machines!
+Summary
+	When I/O-bound, using all your CPU is hard
+		Often run out of RAM first!
+	Threads are your friend!
+		Puma
+	EventMachine is worth a look
+Further reading
+	>MARKDOWN
+	>* [tenderlove on thread safety in
+	>  Rails](http://tenderlovemaking.com/2012/06/18/removing-config-threadsafe.html)
+	>* [Benchmarks of various concurrent Ruby app servers on
+	>  Heroku](https://github.com/jrochkind/fake_work_app/blob/master/README.md)
+	>* [Deferrable Gratification - flow control library for disentangling evented
+	>  programming](http://samstokes.github.io/deferrable_gratification/doc/frames.html)
+Obligatory self-promotion
+	>MARKDOWN
+	>Follow me on Twitter: [@samstokes](https://twitter.com/samstokes)

@@ -1,0 +1,6 @@
+*.html
+*.pdf
+*.xml
+*.fo
+*.tar.gz
+dist
